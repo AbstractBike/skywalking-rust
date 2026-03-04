@@ -18,3 +18,9 @@
 
 pub mod meter;
 pub mod metricer;
+
+#[cfg(feature = "metrics-integration")]
+pub mod recorder;
+
+#[cfg(feature = "prometheus-exporter")]
+pub mod prometheus;
