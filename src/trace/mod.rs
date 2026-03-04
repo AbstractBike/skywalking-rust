@@ -20,3 +20,6 @@ pub mod propagation;
 pub mod span;
 pub mod trace_context;
 pub mod tracer;
+
+#[cfg(feature = "tracing-integration")]
+pub mod layer;
