@@ -40,6 +40,9 @@ rust-version = "1.85"
 management = ["hostname", "systemstat"]
 vendored = ["protobuf-src"]
 kafka-reporter = ["rdkafka"]
+tracing-integration = ["dep:tracing-subscriber"]
+metrics-integration = ["dep:metrics"]
+prometheus-exporter = ["metrics-integration"]
 
 mock = []  # For internal integration testing only, do not use.
 
@@ -50,6 +53,7 @@ cfg-if = "1.0.0"
 futures-core = "0.3.31"
 futures-util = "0.3.31"
 hostname = { version = "0.4.0", optional = true }
+metrics = { version = "0.24", optional = true }
 parking_lot = "0.12.3"
 portable-atomic = { version = "1.11.0", features = ["float"] }
 prost = "0.13.5"
@@ -59,6 +63,7 @@ serde = { version = "1.0.219", features = ["derive"] }
 systemstat = { version = "0.2.4", optional = true }
 thiserror = "2.0.12"
 tokio = { version = "1.44.1", features = ["parking_lot"] }
+tracing-subscriber = { version = "0.3", features = ["registry", "std"], optional = true }
 tokio-stream = { version = "0.1.17", features = ["time"] }
 tonic = { version = "0.12.3", features = ["codegen"] }
 tracing = "0.1.41"
