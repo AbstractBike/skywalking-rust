@@ -16,7 +16,7 @@
 
 //! Grpc implementation of [Report].
 
-use super::{CollectItemConsume, CollectItemProduce};
+use super::{BoundedSender, ChannelConfig, CollectItemConsume, CollectItemProduce};
 #[cfg(feature = "management")]
 use crate::proto::v3::management_service_client::ManagementServiceClient;
 use crate::{
@@ -127,6 +127,28 @@ impl GrpcReporter<mpsc::UnboundedSender<CollectItem>, mpsc::UnboundedReceiver<Co
         let endpoint = address.try_into()?;
         let channel = endpoint.connect().await?;
         Ok(Self::new(channel))
+    }
+}
+
+impl GrpcReporter<BoundedSender, mpsc::Receiver<CollectItem>> {
+    /// New with an existing [Channel] and a bounded internal channel.
+    pub fn new_bounded(channel: Channel, config: ChannelConfig) -> Self {
+        let (tx, rx) = mpsc::channel(config.capacity);
+        let sender = BoundedSender::new(tx, config.strategy);
+        Self::new_with_pc(channel, sender, rx)
+    }
+
+    /// Connect to the Skywalking OAP server with a bounded internal channel.
+    ///
+    /// Use [ChannelConfig] to control capacity and the backpressure strategy
+    /// applied when the channel is full.
+    pub async fn connect_with_config(
+        address: impl TryInto<Endpoint, Error = transport::Error>,
+        config: ChannelConfig,
+    ) -> crate::Result<Self> {
+        let endpoint = address.try_into()?;
+        let channel = endpoint.connect().await?;
+        Ok(Self::new_bounded(channel, config))
     }
 }
 

@@ -16,7 +16,7 @@
 
 //! Kafka implementation of [Report].
 
-use super::{CollectItemConsume, CollectItemProduce};
+use super::{BoundedSender, ChannelConfig, CollectItemConsume, CollectItemProduce};
 use crate::reporter::{CollectItem, Report};
 use rdkafka::{
     config::ClientConfig as RDKafkaClientConfig,
@@ -167,6 +167,18 @@ impl KafkaReportBuilder<mpsc::UnboundedSender<CollectItem>, mpsc::UnboundedRecei
     pub fn new(client_config: ClientConfig) -> Self {
         let (producer, consumer) = mpsc::unbounded_channel();
         Self::new_with_pc(client_config, producer, consumer)
+    }
+}
+
+impl KafkaReportBuilder<BoundedSender, mpsc::Receiver<CollectItem>> {
+    /// Create builder with a bounded internal channel.
+    ///
+    /// Use [ChannelConfig] to control capacity and the backpressure strategy
+    /// applied when the channel is full.
+    pub fn new_bounded(client_config: ClientConfig, channel_config: ChannelConfig) -> Self {
+        let (tx, rx) = mpsc::channel(channel_config.capacity);
+        let sender = BoundedSender::new(tx, channel_config.strategy);
+        Self::new_with_pc(client_config, sender, rx)
     }
 }
 
@@ -379,6 +391,18 @@ impl TopicNames {
             .map(|namespace| format!("{}-{}", namespace, topic_name))
             .unwrap_or_else(|| topic_name.to_string())
     }
+
+    fn topic_for(&self, item: &CollectItem) -> &str {
+        match item {
+            CollectItem::Trace(_) => &self.segment,
+            CollectItem::Log(_) => &self.log,
+            CollectItem::Meter(_) => &self.meter,
+            #[cfg(feature = "management")]
+            CollectItem::Instance(_) => &self.management,
+            #[cfg(feature = "management")]
+            CollectItem::Ping(_) => &self.management,
+        }
+    }
 }
 
 struct KafkaProducer {
@@ -402,33 +426,89 @@ impl KafkaProducer {
     }
 
     async fn produce(&mut self, item: CollectItem) {
-        let (topic_name, key) = match &item {
-            CollectItem::Trace(item) => (
-                &self.topic_names.segment,
-                item.trace_segment_id.as_bytes().to_vec(),
-            ),
-            CollectItem::Log(item) => (&self.topic_names.log, item.service.as_bytes().to_vec()),
-            CollectItem::Meter(item) => (
-                &self.topic_names.meter,
-                item.service_instance.as_bytes().to_vec(),
-            ),
+        let key = match &item {
+            CollectItem::Trace(item) => item.trace_segment_id.as_bytes().to_vec(),
+            CollectItem::Log(item) => item.service.as_bytes().to_vec(),
+            CollectItem::Meter(item) => item.service_instance.as_bytes().to_vec(),
             #[cfg(feature = "management")]
-            CollectItem::Instance(item) => (
-                &self.topic_names.management,
-                format!("register-{}", &item.service_instance).into_bytes(),
-            ),
+            CollectItem::Instance(item) => {
+                format!("register-{}", &item.service_instance).into_bytes()
+            }
             #[cfg(feature = "management")]
-            CollectItem::Ping(item) => (
-                &self.topic_names.log,
-                item.service_instance.as_bytes().to_vec(),
-            ),
+            CollectItem::Ping(item) => item.service_instance.as_bytes().to_vec(),
         };
 
+        let topic_name = self.topic_names.topic_for(&item).to_owned();
         let payload = item.encode_to_vec();
-        let record = FutureRecord::to(topic_name).payload(&payload).key(&key);
+        let record = FutureRecord::to(&topic_name).payload(&payload).key(&key);
 
         if let Err((err, _)) = self.client.send(record, Duration::from_secs(0)).await {
             (self.err_handle)("Collect data to kafka failed", &err);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::v3::{LogData, MeterData, SegmentObject};
+
+    fn topic_names() -> TopicNames {
+        TopicNames::new(None)
+    }
+
+    fn topic_names_with_ns() -> TopicNames {
+        TopicNames::new(Some("myns"))
+    }
+
+    #[test]
+    fn trace_routes_to_segment_topic() {
+        let tn = topic_names();
+        let item = CollectItem::Trace(Box::new(SegmentObject::default()));
+        assert_eq!(tn.topic_for(&item), TopicNames::TOPIC_SEGMENT);
+    }
+
+    #[test]
+    fn log_routes_to_log_topic() {
+        let tn = topic_names();
+        let item = CollectItem::Log(Box::new(LogData::default()));
+        assert_eq!(tn.topic_for(&item), TopicNames::TOPIC_LOG);
+    }
+
+    #[test]
+    fn meter_routes_to_meter_topic() {
+        let tn = topic_names();
+        let item = CollectItem::Meter(Box::new(MeterData::default()));
+        assert_eq!(tn.topic_for(&item), TopicNames::TOPIC_METER);
+    }
+
+    #[cfg(feature = "management")]
+    mod management_tests {
+        use super::*;
+        use crate::proto::v3::{InstancePingPkg, InstanceProperties};
+
+        #[test]
+        fn instance_routes_to_management_topic() {
+            let tn = topic_names();
+            let item = CollectItem::Instance(Box::new(InstanceProperties::default()));
+            assert_eq!(tn.topic_for(&item), TopicNames::TOPIC_MANAGEMENT);
+        }
+
+        #[test]
+        fn ping_routes_to_management_topic() {
+            let tn = topic_names();
+            let item = CollectItem::Ping(Box::new(InstancePingPkg::default()));
+            assert_eq!(tn.topic_for(&item), TopicNames::TOPIC_MANAGEMENT);
+        }
+
+        #[test]
+        fn ping_routes_to_management_topic_with_namespace() {
+            let tn = topic_names_with_ns();
+            let item = CollectItem::Ping(Box::new(InstancePingPkg::default()));
+            assert_eq!(
+                tn.topic_for(&item),
+                format!("myns-{}", TopicNames::TOPIC_MANAGEMENT)
+            );
         }
     }
 }
