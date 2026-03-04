@@ -95,6 +95,46 @@ impl<T: Report> Report for OnceCell<T> {
     }
 }
 
+/// Strategy when the internal bounded channel is full.
+#[derive(Debug, Clone, Copy, Default)]
+pub enum BackpressureStrategy {
+    /// Drop the item and propagate the error to the error handler.
+    #[default]
+    Drop,
+    /// Block the calling thread until space is available.
+    Block,
+}
+
+/// Configuration for the internal channel used by reporters.
+#[derive(Debug, Clone)]
+pub struct ChannelConfig {
+    /// Maximum number of items the channel can hold before applying backpressure.
+    pub capacity: usize,
+    /// Strategy applied when the channel is full.
+    pub strategy: BackpressureStrategy,
+}
+
+impl Default for ChannelConfig {
+    fn default() -> Self {
+        Self {
+            capacity: 1024,
+            strategy: BackpressureStrategy::Drop,
+        }
+    }
+}
+
+/// A bounded mpsc sender with a configurable backpressure strategy.
+pub struct BoundedSender {
+    inner: mpsc::Sender<CollectItem>,
+    strategy: BackpressureStrategy,
+}
+
+impl BoundedSender {
+    pub(crate) fn new(inner: mpsc::Sender<CollectItem>, strategy: BackpressureStrategy) -> Self {
+        Self { inner, strategy }
+    }
+}
+
 /// Special purpose, used for user-defined production operations. Generally, it
 /// does not need to be handled.
 pub trait CollectItemProduce: Send + Sync + 'static {
@@ -105,6 +145,18 @@ pub trait CollectItemProduce: Send + Sync + 'static {
 impl CollectItemProduce for () {
     fn produce(&self, _item: CollectItem) -> Result<(), Box<dyn Error>> {
         Ok(())
+    }
+}
+
+impl CollectItemProduce for BoundedSender {
+    fn produce(&self, item: CollectItem) -> Result<(), Box<dyn Error>> {
+        match self.strategy {
+            BackpressureStrategy::Drop => match self.inner.try_send(item) {
+                Ok(()) => Ok(()),
+                Err(e) => Err(Box::new(e)),
+            },
+            BackpressureStrategy::Block => Ok(self.inner.blocking_send(item)?),
+        }
     }
 }
 
@@ -180,5 +232,63 @@ impl CollectItemConsume for mpsc::UnboundedReceiver<CollectItem> {
                 TryRecvError::Disconnected => Err(Box::new(e)),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::v3::SegmentObject;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    fn make_item() -> CollectItem {
+        CollectItem::Trace(Box::new(SegmentObject::default()))
+    }
+
+    #[test]
+    fn channel_config_default_capacity_is_1024() {
+        let cfg = ChannelConfig::default();
+        assert_eq!(cfg.capacity, 1024);
+    }
+
+    #[test]
+    fn bounded_sender_drop_strategy_returns_err_when_full() {
+        // Capacity of 1; fill it and verify produce returns Err on the second item.
+        let (tx, _rx) = mpsc::channel::<CollectItem>(1);
+        let sender = BoundedSender::new(tx, BackpressureStrategy::Drop);
+
+        // First item fits.
+        assert!(sender.produce(make_item()).is_ok());
+        // Second item causes Full → Err propagated to err_handle.
+        assert!(sender.produce(make_item()).is_err());
+    }
+
+    #[test]
+    fn bounded_sender_drop_strategy_err_handle_called() {
+        let (tx, _rx) = mpsc::channel::<CollectItem>(1);
+        let sender = BoundedSender::new(tx, BackpressureStrategy::Drop);
+        let counter = Arc::new(AtomicUsize::new(0));
+
+        sender.produce(make_item()).ok();
+
+        let c = counter.clone();
+        // Simulate what GrpcReporter::report does: call err_handle on Err.
+        if sender.produce(make_item()).is_err() {
+            c.fetch_add(1, Ordering::SeqCst);
+        }
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn channel_config_custom_capacity() {
+        let cfg = ChannelConfig {
+            capacity: 512,
+            strategy: BackpressureStrategy::Block,
+        };
+        let (tx, _rx) = mpsc::channel::<CollectItem>(cfg.capacity);
+        assert_eq!(tx.capacity(), 512);
     }
 }
