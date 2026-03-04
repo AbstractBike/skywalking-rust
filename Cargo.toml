@@ -40,6 +40,8 @@ rust-version = "1.85"
 management = ["hostname", "systemstat"]
 vendored = ["protobuf-src"]
 kafka-reporter = ["rdkafka"]
+metrics-integration = ["dep:metrics"]
+prometheus-exporter = ["metrics-integration"]
 
 mock = []  # For internal integration testing only, do not use.
 
@@ -50,6 +52,7 @@ cfg-if = "1.0.0"
 futures-core = "0.3.31"
 futures-util = "0.3.31"
 hostname = { version = "0.4.0", optional = true }
+metrics = { version = "0.24", optional = true }
 parking_lot = "0.12.3"
 portable-atomic = { version = "1.11.0", features = ["float"] }
 prost = "0.13.5"
